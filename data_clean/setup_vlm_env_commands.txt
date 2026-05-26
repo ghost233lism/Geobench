@@ -1,0 +1,34 @@
+# 可选：先确认在目标 conda 环境中（建议 Python 3.10）
+python3 -V
+pip -V
+
+# 1) PyTorch + CUDA 12.4
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+
+# 2) Transformers + 基础依赖
+pip install transformers==4.59.1 accelerate==0.34.2 sentencepiece==0.2.0 protobuf==5.28.2
+
+# 3) ms-swift（PyPI）
+pip install -U ms-swift
+
+# 4) Qwen/PEFT/liger-kernel
+pip install -U "qwen_vl_utils>=0.0.14" peft liger-kernel
+
+# 5) GCC 11（如果你在 conda 环境且需要编译扩展）
+conda install -c conda-forge gcc=11 gxx=11 -y
+
+# 6) 本地 whl（在 whl 所在目录执行，或把文件名改成绝对路径）
+pip install causal_conv1d-1.5.4+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl --no-build-isolation
+pip install flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl --no-build-isolation
+
+# 7) deepspeed
+pip install -U deepspeed
+
+# 8) vllm
+pip install -U "vllm>=0.17.0"
+
+# 9) 安装本地开发版 ms-swift（注意是 ms-swift，不是 ms_swift）
+pip install -e /nfs/sunboyuan/Geobench/ms-swift --no-deps
+
+# 10) 最后做一次导入检查
+python3 -c "import torch, transformers, accelerate, swift, vllm, deepspeed; print('Smoke test OK')"

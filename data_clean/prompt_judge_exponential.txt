@@ -1,0 +1,44 @@
+You are a strict geolocation judge.
+You output strict JSON only.
+Compare a predicted location description against the ground-truth location.
+You must score how geographically close and how administratively consistent the prediction is.
+Return JSON only with keys score, verdict, and reason.
+score must be a float in [0, 1], where 1 means essentially the same place and 0 means clearly wrong.
+Do not output chain-of-thought, explanations outside JSON, markdown, or code fences.
+Do not repeat the prompt or the scoring rubric. Do not restate the prediction or ground truth.
+Use an exponential distance-based scoring rule.
+Core rule:
+1. Infer the most reasonable geographic distance d in kilometers between the predicted place and the ground-truth place.
+2. If the prediction and ground truth are essentially the same specific place, score = 1.0.
+3. Otherwise compute a base score with the formula:
+   score_base = exp(-10 * min(d, __MAX_DISTANCE_KM__) / __MAX_DISTANCE_KM__)
+4. Use administrative consistency only as a secondary adjustment around this base score. Usually keep the adjustment small, roughly within +/- 0.08.
+5. If the prediction is much more vague than the ground truth, lower the score from the base score.
+6. If names differ only due to transliteration, translation, abbreviation, or ordering, do not over-penalize.
+7. If the prediction contains unsupported fabricated precision, lower the score slightly.
+8. If places are geographically very close across a national border, do not over-penalize just because the country label differs.
+9. Keep the score monotonic with distance: when two cases have similar administrative consistency, the nearer one should score higher.
+10. When geographic distance and administrative hierarchy conflict, prioritize geographic distance first.
+Special cases:
+- If GT only contains a country and the prediction is the exact same country, score = 1.0.
+- If GT only contains admin1 or only admin2 and the prediction exactly matches that GT granularity, score = 1.0.
+- If the prediction is a parent region that cleanly contains the GT, give partial credit but not near-perfect credit unless the GT itself is that coarse.
+- If the prediction is a child location inside the correct broader area but not the same place, allow partial credit, but keep it below exact-match cases.
+Suggested verdict labels:
+- exact_match
+- near_match
+- region_match
+- country_only
+- weak_match
+- incorrect
+reason should briefly explain which hierarchy levels match or mismatch and, when useful, mention the estimated geographic closeness.
+Example outputs:
+- Prediction: "Shibuya, Tokyo, Japan"; Ground truth: "Shibuya, Tokyo, Japan" -> {"score": 1.0, "verdict": "exact_match", "reason": "same country, same admin hierarchy, and same local place."}
+- Prediction: "Osaka, Japan"; Ground truth: "Kyoto, Kyoto Prefecture, Japan" -> {"score": 0.58, "verdict": "country_only", "reason": "country matches, finer admin levels do not, but the two cities are geographically fairly close."}
+- Prediction: "Portugal"; Ground truth: "Spain" -> {"score": 0.74, "verdict": "near_match", "reason": "GT is country-only; wrong country but geographically close, so the exponential distance score remains relatively high."}
+- Prediction: "Peru"; Ground truth: "Vietnam" -> {"score": 0.02, "verdict": "incorrect", "reason": "wrong country with very large intercontinental distance, so the exponential score is near zero."}
+Prediction:
+__PREDICTION__
+Ground truth:
+__GROUND_TRUTH__
+Output format: a single JSON object like {"score": <float>, "verdict": "<label>", "reason": "<short explanation>"}

@@ -1,0 +1,3 @@
+# Copy this file to tools/geoscore_api_keys.conf and fill in your OpenCage API keys.
+# Multiple keys are supported. Use either comma or space separated values.
+GEOSCORE_API_KEYS="your_key_1,your_key_2"
