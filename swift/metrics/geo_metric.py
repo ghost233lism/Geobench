@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import time
 import json
+import os
 import re
 import requests
 from abc import ABC, abstractmethod
@@ -64,8 +65,7 @@ class BaiduGeocoding:
 class OpenCageGeocoding:
     """OpenCage地理编码功能集成"""
     
-    def __init__(self, api_key_list=['7d2eca3fd1e14204a00cb1c1c354d183','fb3f0e5f032b414891c1e696b9ba66c0','07b868837b67445a997bd6f942e0a09f','d48d2940895c4f178eb0ee6fd31193eb'
-        ],language: str = "en"):
+    def __init__(self, api_key_list: Optional[List[str]] = None, language: str = "en"):
         """
         初始化OpenCage地理编码器
         
@@ -73,9 +73,36 @@ class OpenCageGeocoding:
             api_key: OpenCage API密钥
             language: 返回结果的语言，默认为英文
         """
+        if api_key_list is None:
+            api_key_list = self._split_api_keys(os.environ.get('GEOSCORE_API_KEYS'))
         self.api_key_list = api_key_list
+        self.api_key = self.api_key_list[0] if self.api_key_list else ''
         self.base_url = "https://api.opencagedata.com/geocode/v1/json"
         self.language = language
+
+    @staticmethod
+    def _split_api_keys(api_keys: Optional[str]) -> List[str]:
+        if not api_keys:
+            return []
+        keys = []
+        for raw_key in api_keys.replace(',', ' ').split():
+            raw_key = raw_key.strip()
+            if raw_key:
+                keys.append(raw_key)
+        return keys
+
+    @staticmethod
+    def _mask_api_key(api_key: str) -> str:
+        if len(api_key) <= 8:
+            return '***'
+        return f'***{api_key[-4:]}'
+
+    def _sanitize_api_error(self, error: Exception) -> str:
+        message = str(error)
+        for key in self.api_key_list:
+            if key:
+                message = message.replace(key, self._mask_api_key(key))
+        return re.sub(r'([?&]key=)[^&\s]+', r'\1***', message)
         
     def geocode_old(self, address: str) -> Optional[tuple]:
         """
@@ -110,7 +137,7 @@ class OpenCageGeocoding:
                 # logger.warning(f"OpenCage地理编码失败: 未找到匹配的地址")
                 return None
         except Exception as e:
-            logger.error(f"OpenCage地理编码请求失败: {str(e)}")
+            logger.error(f"OpenCage地理编码请求失败: {self._sanitize_api_error(e)}")
             return None
     
     def geocode(self, address: str, retry_count: int = 0) -> Dict:
@@ -125,6 +152,9 @@ class OpenCageGeocoding:
             包含坐标和置信度信息的字典
         """
         import random
+        if not self.api_key_list:
+            logger.warning('OpenCage API key list is empty; set GEOSCORE_API_KEYS to enable geocoding.')
+            return None
         random_num = random.randint(1, len(self.api_key_list))
         api_key=self.api_key_list[random_num-1]
 
@@ -221,7 +251,8 @@ class OpenCageGeocoding:
 
                 
         except requests.exceptions.RequestException as e:
-            print(f"[GeoScoreAccuracy] OpenCage API请求时发生错误: {e}")
+            safe_error = self._sanitize_api_error(e)
+            print(f"[GeoScoreAccuracy] OpenCage API请求时发生错误: {safe_error}")
             
             # 网络错误可以重试
             if retry_count < 5:

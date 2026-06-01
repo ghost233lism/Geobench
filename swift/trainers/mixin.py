@@ -955,6 +955,29 @@ class SwiftMixin:
                 if grad_norm is not None:
                     logs['grad_norm'] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs['learning_rate'] = self._get_learning_rate()
+            if os.environ.get('GEOBENCH_LOG_OPTIM_STEP_STATS', '').lower() in {'1', 'true', 'yes', 'on'}:
+                engine = getattr(self, 'model_wrapped', None) or getattr(self, 'model', None)
+                optimizer = getattr(engine, 'optimizer', None) or getattr(self, 'optimizer', None)
+
+                def _safe_attr(obj, name):
+                    value = getattr(obj, name, None)
+                    if callable(value):
+                        return '<callable>'
+                    if isinstance(value, torch.Tensor):
+                        return value.item() if value.numel() == 1 else f'tensor(shape={tuple(value.shape)})'
+                    return value
+
+                logger.warning(
+                    'optimizer step stats at '
+                    f'global_step={self.state.global_step}: '
+                    f'accelerator_skipped={getattr(self.accelerator, "optimizer_step_was_skipped", None)}, '
+                    f'engine_global_steps={_safe_attr(engine, "global_steps")}, '
+                    f'engine_skipped_steps={_safe_attr(engine, "skipped_steps")}, '
+                    f'engine_overflow={_safe_attr(engine, "overflow")}, '
+                    f'optimizer_overflow={_safe_attr(optimizer, "overflow")}, '
+                    f'optimizer_cur_scale={_safe_attr(optimizer, "cur_scale")}, '
+                    f'optimizer_loss_scale={_safe_attr(optimizer, "loss_scale")}, '
+                    f'optimizer_global_grad_norm={_safe_attr(optimizer, "_global_grad_norm")}')
             tr_loss -= tr_loss
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step

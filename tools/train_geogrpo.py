@@ -67,6 +67,7 @@ def parse_args():
     parser.add_argument('--per-device-train-batch-size', default='1')
     parser.add_argument('--gradient-accumulation-steps', default='8')
     parser.add_argument('--learning-rate', default='1e-5')
+    parser.add_argument('--torch-dtype', default='bfloat16')
     parser.add_argument('--max-length', default='4096')
     parser.add_argument('--max-completion-length', default='1024')
     parser.add_argument('--max-pixels', default=None, help='Optional Swift max_pixels limit. Omit for no limit.')
@@ -83,6 +84,7 @@ def parse_args():
     parser.add_argument('--enable-thinking', default='false')
     parser.add_argument('--response-prefix', default='')
     parser.add_argument('--move-model-batches', default='8')
+    parser.add_argument('--sleep-level', default='1')
     parser.add_argument('--offload-optimizer', default='false')
     parser.add_argument('--offload-model', default='false')
     parser.add_argument('--save-strategy', default='steps')
@@ -90,6 +92,7 @@ def parse_args():
     parser.add_argument('--save-total-limit', default='200')
     parser.add_argument('--logging-steps', default='1')
     parser.add_argument('--warmup-ratio', default='0.01')
+    parser.add_argument('--max-grad-norm', default='1.0')
     parser.add_argument('--dataloader-num-workers', default='8')
     parser.add_argument('--dataset-num-proc', default='8')
     parser.add_argument('--temperature', default='0.7')
@@ -301,7 +304,7 @@ def build_swift_command(args, dataset_path, run_name):
         '--train_type', 'full',
         '--freeze_vit', args.freeze_vit,
         '--freeze_aligner', args.freeze_aligner,
-        '--torch_dtype', 'bfloat16',
+        '--torch_dtype', args.torch_dtype,
         '--use_vllm', 'true',
         '--vllm_mode', args.vllm_mode,
         '--enable_thinking', args.enable_thinking,
@@ -337,7 +340,7 @@ def build_swift_command(args, dataset_path, run_name):
         '--swanlab_exp_name', args.swanlab_exp_name or run_name,
         '--gradient_checkpointing', args.gradient_checkpointing,
         '--vit_gradient_checkpointing', args.vit_gradient_checkpointing,
-        '--max_grad_norm', '1.0',
+        '--max_grad_norm', args.max_grad_norm,
         '--epsilon', '0.2',
         '--epsilon_high', '0.28',
         '--scale_rewards', 'none',
@@ -360,7 +363,7 @@ def build_swift_command(args, dataset_path, run_name):
             '--vllm_gpu_memory_utilization', args.vllm_gpu_memory_utilization,
             '--vllm_tensor_parallel_size', args.vllm_tensor_parallel_size,
             '--move_model_batches', args.move_model_batches,
-            '--sleep_level', '1',
+            '--sleep_level', args.sleep_level,
         ])
     if args.max_pixels is not None:
         cmd.extend(['--max_pixels', args.max_pixels])

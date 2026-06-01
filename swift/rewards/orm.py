@@ -79,11 +79,19 @@ class MathAccuracy(ORM):
             'The math_verify package is required but not installed. '
             "Please install it using 'pip install math_verify'.")
 
-    def __call__(self, completions, solution, **kwargs) -> List[float]:
+    def __call__(self, completions, solution=None, **kwargs) -> List[float]:
         from latex2sympy2_extended import NormalizationConfig
         from math_verify import LatexExtractionConfig, parse, verify
+        if solution is None:
+            solution = kwargs.get('solution')
+        if solution is None:
+            return [0.0] * len(completions)
+
         rewards = []
         for content, sol in zip(completions, solution):
+            if not sol:
+                rewards.append(0.0)
+                continue
             content_match = re.search(r'<answer>(.*?)</answer>', content, re.DOTALL)
             content_to_parse = content_match.group(1).strip() if content_match else content
             has_answer_tag = content_match is not None
@@ -158,9 +166,11 @@ class CosineReward(ORM):
         import math
         return max_value - (max_value - min_value) * (1 - math.cos(t * math.pi / T)) / 2
 
-    def __call__(self, completions, solution, **kwargs) -> List[float]:
+    def __call__(self, completions, solution=None, **kwargs) -> List[float]:
         acc_rewards = self.accuracy_orm(completions, solution, **kwargs)
         response_token_ids = kwargs.get('response_token_ids')
+        if response_token_ids is None:
+            response_token_ids = [completion.split() for completion in completions]
         rewards = []
         for ids, acc_reward in zip(response_token_ids, acc_rewards):
             is_correct = acc_reward >= 1.
@@ -332,13 +342,22 @@ class ReactORM(ORM):
         action, action_input = ReactORM.parse_action(text)
         return action, action_input
 
-    def __call__(self, infer_requests: List[Union['InferRequest', Dict]], solution: List[str], **kwargs) -> List[float]:
+    def __call__(self, infer_requests: List[Union['InferRequest', Dict]], solution: Optional[List[str]] = None,
+                 **kwargs) -> List[float]:
         rewards = []
+        if solution is None:
+            solution = kwargs.get('solution')
+        if solution is None:
+            return [0.0] * len(infer_requests)
+
         if not isinstance(infer_requests[0], str):
             predictions = [request['messages'][-1]['content'] for request in infer_requests]
         else:
             predictions = infer_requests
         for prediction, ground_truth in zip(predictions, solution):
+            if not ground_truth:
+                rewards.append(0.0)
+                continue
             if prediction.endswith('Observation:'):
                 prediction = prediction[:prediction.index('Observation:')].strip()
             action_ref = []
@@ -435,11 +454,24 @@ class MathORM(ORM):
             value = False
         return value
 
-    def __call__(self, infer_requests: List[Union['InferRequest', Dict]], ground_truths: List[str],
+    def __call__(self, infer_requests: List[Union['InferRequest', Dict]], ground_truths: Optional[List[str]] = None,
                  **kwargs) -> List[float]:
         rewards = []
-        predictions = [request.messages[-1]['content'] for request in infer_requests]
+        if ground_truths is None:
+            ground_truths = kwargs.get('ground_truths') or kwargs.get('solution')
+        if ground_truths is None:
+            return [0.0] * len(infer_requests)
+
+        if isinstance(infer_requests[0], str):
+            predictions = infer_requests
+        elif isinstance(infer_requests[0], dict):
+            predictions = [request['messages'][-1]['content'] for request in infer_requests]
+        else:
+            predictions = [request.messages[-1]['content'] for request in infer_requests]
         for prediction, ground_truth in zip(predictions, ground_truths):
+            if not ground_truth:
+                rewards.append(0.0)
+                continue
             if '# Answer' in prediction:
                 prediction = prediction.split('# Answer')[1]
             if '# Answer' in ground_truth:
@@ -495,6 +527,98 @@ class GeoAnswerFormat(ORM):
                 results.append(0.0)
                 
         return results
+
+
+class GeoNoUnknown(ORM):
+    FINAL_BANNED_RE = re.compile(
+        r'\b(?:unknown|n/?a|unspecified|undetermined|unidentified|uncertain|unclear|'
+        r'placeholder|generic)\b'
+        r'|not enough|cannot be determined|can not be determined|not possible to determine|'
+        r'hard to determine|difficult to determine',
+        re.I,
+    )
+    REFUSAL_RE = re.compile(
+        r'\b(?:cannot|can not|can\'t|unable to)\s+(?:be\s+)?(?:\w+\s+){0,3}'
+        r'(?:determin(?:e|ed)|identif(?:y|ied)|infer(?:red)?|locate(?:d)?|'
+        r'geolocate(?:d)?|pinpoint(?:ed)?)\b'
+        r'|\b(?:impossible|not possible|hard|difficult)\s+to\s+(?:\w+\s+){0,3}'
+        r'(?:determine|identify|infer|locate|geolocate|pinpoint)\b'
+        r'|\b(?:insufficient|not enough)\s+(?:visual\s+)?'
+        r'(?:information|evidence|clues|detail|details|context)\b'
+        r'|\bno identifiable\s+(?:geographic\s+)?'
+        r'(?:information|features|landmarks|location|place|clues)\b'
+        r'|\black(?:s|ing)?\s+(?:any\s+)?identifiable\s+(?:geographic\s+)?'
+        r'(?:information|features|landmarks|location|place|clues)\b',
+        re.I,
+    )
+
+    @staticmethod
+    def _strip_special_tokens(content: str) -> str:
+        return re.sub(r'\s*<\|im_end\|>\s*$', '', content.strip())
+
+    @classmethod
+    def _has_unknown_or_refusal(cls, content: str) -> bool:
+        content = cls._strip_special_tokens(content)
+        answer_matches = re.findall(r'<answer>\s*(.*?)\s*</answer>', content, re.DOTALL | re.I)
+        if answer_matches:
+            final_answer = GeoAnswerFormat._extract_final_answer(answer_matches[-1].strip())
+            if final_answer and cls.FINAL_BANNED_RE.search(final_answer):
+                return True
+
+        return bool(cls.REFUSAL_RE.search(content))
+
+    def __call__(self, completions, **kwargs) -> List[float]:
+        rewards = []
+        for content in completions:
+            rewards.append(0.0 if self._has_unknown_or_refusal(content) else 1.0)
+        return rewards
+
+
+class GeoStrictFormat(ORM):
+    BLOCK_RE = re.compile(r'^<think>\s*(.*?)\s*</think>\s*<answer>\s*(.*?)\s*</answer>\s*$', re.S | re.I)
+
+    @staticmethod
+    def _strip_special_tokens(content: str) -> str:
+        return re.sub(r'\s*<\|im_end\|>\s*$', '', content.strip())
+
+    def __call__(self, completions, **kwargs) -> List[float]:
+        rewards = []
+        for content in completions:
+            content = self._strip_special_tokens(content)
+            if GeoNoUnknown._has_unknown_or_refusal(content):
+                rewards.append(0.0)
+                continue
+
+            match = self.BLOCK_RE.match(content)
+            if not match:
+                rewards.append(0.0)
+                continue
+
+            try:
+                think_json = json.loads(match.group(1).strip())
+                answer_json = json.loads(match.group(2).strip())
+            except json.JSONDecodeError:
+                rewards.append(0.0)
+                continue
+
+            if set(think_json) != {'Clues', 'Reasoning'} or set(answer_json) != {'FinalAnswer'}:
+                rewards.append(0.0)
+                continue
+
+            clues = think_json.get('Clues')
+            reasoning = think_json.get('Reasoning')
+            final_answer = str(answer_json.get('FinalAnswer', '')).strip()
+            parts = [part.strip() for part in re.split(r'[;；]', final_answer) if part.strip()]
+            valid = (
+                isinstance(clues, list)
+                and bool(clues)
+                and all(isinstance(item, str) and item.strip() for item in clues)
+                and isinstance(reasoning, str)
+                and bool(reasoning.strip())
+                and len(parts) == 3
+            )
+            rewards.append(1.0 if valid else 0.0)
+        return rewards
 
 
 class GeoScoreAccuracy(ORM):
@@ -583,6 +707,13 @@ class GeoScoreAccuracy(ORM):
         if len(api_key) <= 8:
             return '***'
         return f'***{api_key[-4:]}'
+
+    def _sanitize_api_error(self, error: Exception) -> str:
+        message = str(error)
+        for key in self.api_list:
+            if key:
+                message = message.replace(key, self._mask_api_key(key))
+        return re.sub(r'([?&]key=)[^&\s]+', r'\1***', message)
 
     @staticmethod
     def _cache_key(address: str) -> str:
@@ -926,7 +1057,8 @@ class GeoScoreAccuracy(ORM):
 
                 
         except requests.exceptions.RequestException as e:
-            print(f"[GeoScoreAccuracy] OpenCage API请求时发生错误: {e}")
+            safe_error = self._sanitize_api_error(e)
+            print(f"[GeoScoreAccuracy] OpenCage API请求时发生错误: {safe_error}")
             
             # 网络错误可以重试
             if retry_count < 5:
@@ -934,7 +1066,7 @@ class GeoScoreAccuracy(ORM):
                 time.sleep(0.1)
                 return self._call_opencage_geocoding(address, retry_count + 1)
             else:
-                result = {"status": "error", "code": 0, "message": str(e), "address": address}
+                result = {"status": "error", "code": 0, "message": safe_error, "address": address}
                 self._write_cache_once(address, result)
                 return result
         except Exception as e:
@@ -1154,5 +1286,7 @@ orms = {
     'repetition': RepetitionPenalty,
     'soft_overlong': SoftOverlong,
     'geo_format': GeoAnswerFormat,
+    'geo_no_unknown': GeoNoUnknown,
+    'geo_strict_format': GeoStrictFormat,
     'geoscore_accuracy':GeoScoreAccuracy,
 }

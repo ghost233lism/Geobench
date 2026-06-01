@@ -97,6 +97,7 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         reward_templates = kwargs.pop('reward_template', None)
         self._prepare_algorithm_params()
         super().__init__(model, ref_model, *_args, **kwargs)
+        self._prepare_geobench_grad_debug_hooks()
         self._prepare_chord_dataset()
         self.prepare_rollout()
         self._prepare_rewards(reward_funcs, reward_model, reward_templates)
@@ -153,6 +154,79 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         # `_get_train_sampler` and `_prepare_inputs`.
         self._buffered_inputs = None
         self._current_train_step_time = 0.0
+
+    def _prepare_geobench_grad_debug_hooks(self):
+        detect_anomaly = os.environ.get('GEOBENCH_TORCH_DETECT_ANOMALY', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        if detect_anomaly:
+            torch.autograd.set_detect_anomaly(True, check_nan=True)
+            logger.warning('GeoBench enabled torch autograd anomaly detection.')
+
+        enable_logging_hooks = os.environ.get('GEOBENCH_LOG_PARAM_GRAD_HOOKS', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        enable_stabilize_hooks = os.environ.get('GEOBENCH_STABILIZE_PARAM_GRAD_HOOKS', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        if not enable_logging_hooks and not enable_stabilize_hooks:
+            return
+
+        patterns_text = os.environ.get('GEOBENCH_LOG_PARAM_GRAD_HOOK_PATTERNS', '').strip()
+        patterns = [p.strip() for p in patterns_text.split(',') if p.strip()]
+        log_all = os.environ.get('GEOBENCH_LOG_PARAM_GRAD_HOOK_ALL', '').lower() in {'1', 'true', 'yes', 'on'}
+        abort_on_nonfinite = os.environ.get('GEOBENCH_ABORT_ON_NONFINITE_GRAD', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        max_logs = int(os.environ.get('GEOBENCH_LOG_PARAM_GRAD_HOOK_MAX_LOGS', '40'))
+        self._geobench_param_grad_hook_logs = 0
+        self._geobench_param_grad_hook_handles = []
+
+        def _matches(name: str) -> bool:
+            return not patterns or any(pattern in name for pattern in patterns)
+
+        for name, parameter in self.model.named_parameters():
+            if not parameter.requires_grad or not _matches(name):
+                continue
+
+            def _hook(grad, param_name=name):
+                if grad is None:
+                    return grad
+                with torch.no_grad():
+                    grad_f = grad.detach().float()
+                    finite = torch.isfinite(grad_f)
+                    nonfinite = int((~finite).sum().item())
+                    if not enable_logging_hooks:
+                        return grad
+                    should_log = log_all or nonfinite > 0
+                    if should_log and self._geobench_param_grad_hook_logs < max_logs:
+                        self._geobench_param_grad_hook_logs += 1
+                        if finite.any():
+                            finite_values = grad_f[finite]
+                            abs_max = float(finite_values.abs().max().item())
+                            mean = float(finite_values.mean().item())
+                            norm = float(finite_values.norm().item())
+                        else:
+                            abs_max = float('nan')
+                            mean = float('nan')
+                            norm = float('nan')
+                        rank = getattr(self.accelerator, 'process_index', -1)
+                        logger.warning(
+                            f'GeoBench param grad hook rank={rank} global_step={self.state.global_step}: '
+                            f'name={param_name}, shape={tuple(grad.shape)}, dtype={grad.dtype}, '
+                            f'nonfinite={nonfinite}/{grad.numel()}, norm={norm:.8e}, '
+                            f'mean={mean:.8e}, abs_max={abs_max:.8e}')
+                    if nonfinite > 0 and abort_on_nonfinite:
+                        raise RuntimeError(
+                            f'GeoBench aborting on nonfinite gradient for {param_name}: '
+                            f'nonfinite={nonfinite}/{grad.numel()}')
+                return grad
+
+            self._geobench_param_grad_hook_handles.append(parameter.register_hook(_hook))
+
+        logger.warning(
+            f'GeoBench registered {len(self._geobench_param_grad_hook_handles)} parameter gradient hooks '
+            f'(logging={enable_logging_hooks}).')
 
     def _get_data_collator(self, args, template):
         return identity_data_collator
@@ -1238,6 +1312,52 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         else:
             raise ValueError(f'Unknown loss type: {self.loss_type}')
 
+        log_grpo_loss_stats = os.environ.get('GEOBENCH_LOG_GRPO_LOSS_STATS', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        if log_grpo_loss_stats and getattr(self.accelerator, 'is_main_process', False):
+            if not hasattr(self, '_geobench_grpo_loss_logged_steps'):
+                self._geobench_grpo_loss_logged_steps = set()
+            log_key = (int(self.state.global_step), int(getattr(self, '_step', -1)))
+            if log_key not in self._geobench_grpo_loss_logged_steps:
+                self._geobench_grpo_loss_logged_steps.add(log_key)
+                with torch.no_grad():
+                    adv = advantages.detach().float()
+                    mask = completion_mask.detach()
+                    lr = self._get_learning_rate() if hasattr(self, '_get_learning_rate') else None
+                    logger.warning(
+                        f'GRPO loss stats at global_step={self.state.global_step}: '
+                        f'loss={float(loss.detach().float().item()):.8e}, '
+                        f'loss_requires_grad={loss.requires_grad}, '
+                        f'per_token_logps_requires_grad={per_token_logps.requires_grad}, '
+                        f'advantages_mean={float(adv.mean().item()):.8e}, '
+                        f'advantages_std={float(adv.std(unbiased=False).item()):.8e}, '
+                        f'advantages_min={float(adv.min().item()):.8e}, '
+                        f'advantages_max={float(adv.max().item()):.8e}, '
+                        f'advantages_nonzero={int((adv != 0).sum().item())}/{adv.numel()}, '
+                        f'completion_tokens={int(mask.sum().item())}, '
+                        f'log_ratio_abs_max={float(log_ratio.detach().float().abs().max().item()):.8e}, '
+                        f'coef_1_mean={float(coef_1.detach().float().mean().item()):.8e}, '
+                        f'learning_rate={lr}')
+
+            log_grpo_backward = os.environ.get('GEOBENCH_LOG_GRPO_BACKWARD_STATS', '').lower() in {
+                '1', 'true', 'yes', 'on'
+            }
+            if log_grpo_backward and per_token_logps.requires_grad:
+                step_for_hook = int(self.state.global_step)
+
+                def _geobench_log_per_token_logps_grad(grad):
+                    grad_f = grad.detach().float()
+                    logger.warning(
+                        f'GRPO per_token_logps grad at global_step={step_for_hook}: '
+                        f'norm={float(grad_f.norm().item()):.8e}, '
+                        f'mean={float(grad_f.mean().item()):.8e}, '
+                        f'abs_max={float(grad_f.abs().max().item()):.8e}, '
+                        f'nonzero={int((grad_f != 0).sum().item())}/{grad_f.numel()}')
+                    return grad
+
+                per_token_logps.register_hook(_geobench_log_per_token_logps_grad)
+
         completion_token_count = completion_mask.sum().clamp(min=1.0)
 
         def masked_batch_mean(x):
@@ -1869,7 +1989,47 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # Wait for the eval rollout to complete
             while not self.is_async_generate_eval_rollout_done():
                 time.sleep(0.1)
-        return super().training_step(model, inputs, num_items_in_batch)
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        if os.environ.get('GEOBENCH_LOG_GRPO_PARAM_GRADS', '').lower() in {'1', 'true', 'yes', 'on'}:
+            if not hasattr(self, '_geobench_param_grad_logged_steps'):
+                self._geobench_param_grad_logged_steps = set()
+            log_key = (int(self.state.global_step), int(getattr(self, '_step', -1)))
+            if log_key not in self._geobench_param_grad_logged_steps:
+                self._geobench_param_grad_logged_steps.add(log_key)
+                with torch.no_grad():
+                    requires_grad_params = 0
+                    grad_params = 0
+                    none_grad_params = 0
+                    zero_grad_params = 0
+                    total_grad_sq = None
+                    max_abs_grad = 0.0
+                    examples = []
+                    for name, param in model.named_parameters():
+                        if not getattr(param, 'requires_grad', False):
+                            continue
+                        requires_grad_params += 1
+                        grad = getattr(param, 'grad', None)
+                        if grad is None:
+                            none_grad_params += 1
+                            continue
+                        grad_params += 1
+                        grad_f = grad.detach().float()
+                        grad_abs_max = float(grad_f.abs().max().item()) if grad_f.numel() else 0.0
+                        if grad_abs_max == 0.0:
+                            zero_grad_params += 1
+                        max_abs_grad = max(max_abs_grad, grad_abs_max)
+                        grad_sq = grad_f.pow(2).sum()
+                        total_grad_sq = grad_sq if total_grad_sq is None else total_grad_sq + grad_sq
+                        if len(examples) < 3:
+                            examples.append(f'{name}: shape={tuple(grad.shape)} max_abs={grad_abs_max:.6e}')
+                    total_grad_norm = 0.0 if total_grad_sq is None else float(total_grad_sq.sqrt().item())
+                logger.warning(
+                    f'GRPO param grad stats at global_step={self.state.global_step}, '
+                    f'process={self.accelerator.process_index}: '
+                    f'requires_grad_params={requires_grad_params}, grad_params={grad_params}, '
+                    f'none_grad_params={none_grad_params}, zero_grad_params={zero_grad_params}, '
+                    f'grad_norm={total_grad_norm:.6e}, max_abs_grad={max_abs_grad:.6e}, examples={examples}')
+        return loss
 
     def old_policy(self):
         if self.template.sequence_parallel_size == 1:

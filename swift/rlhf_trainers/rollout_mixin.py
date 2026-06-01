@@ -231,8 +231,9 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             # Use load_format from vllm_engine_kwargs if provided, otherwise default to 'dummy'
             vllm_engine_kwargs = self.args.vllm_engine_kwargs or {}
             load_format = vllm_engine_kwargs.pop('load_format', 'dummy')
+            engine_model_dir = os.environ.get('GEOBENCH_COLOCATE_VLLM_MODEL_DIR') or model.model_dir
             engine = GRPOVllmEngine(
-                model.model_dir,
+                engine_model_dir,
                 torch_dtype=model.model_info.torch_dtype,
                 model_type=model.model_meta.model_type,
                 use_async_engine=False,
@@ -374,6 +375,19 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if args.async_generate and not skip_async_check:
             self._wait_queue()
 
+        skip_after_step0 = os.environ.get('GEOBENCH_SKIP_VLLM_SYNC_AFTER_STEP0', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        if skip_after_step0 and self.state.global_step > 0:
+            logger.warning(
+                f'Skipping vLLM weight sync at global_step={self.state.global_step} '
+                'because GEOBENCH_SKIP_VLLM_SYNC_AFTER_STEP0 is set.')
+            if self.vllm_mode == 'server' and self.accelerator.is_main_process:
+                self.vllm_client.reset_prefix_cache()
+            elif self.vllm_mode == 'colocate':
+                self.engine.engine.reset_prefix_cache()
+            return
+
         tuner_type = args.tuner_type
 
         if tuner_type == 'full' or (not self.base_sync_done or args.sleep_level == 2) or not self.rollout_enable_lora:
@@ -449,6 +463,116 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
     def _load_state_dict_to_vllm(self, state_dict):
         """Load state_dict to vLLM engine (server or colocate mode)"""
+        log_finite = os.environ.get('GEOBENCH_LOG_VLLM_SYNC_FINITE', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        log_stats = os.environ.get('GEOBENCH_LOG_VLLM_SYNC_STATS', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
+        if log_finite:
+            checked_params = 0
+            checked_elements = 0
+            bad_params = 0
+            bad_elements = 0
+            examples = []
+            with torch.no_grad():
+                for name, param in state_dict.items():
+                    if not isinstance(param, torch.Tensor) or not torch.is_floating_point(param):
+                        continue
+                    checked_params += 1
+                    checked_elements += param.numel()
+                    finite = torch.isfinite(param)
+                    if not bool(finite.all().item()):
+                        nonfinite = int((~finite).sum().item())
+                        bad_params += 1
+                        bad_elements += nonfinite
+                        if len(examples) < 5:
+                            examples.append(f'{name}: nonfinite={nonfinite} shape={tuple(param.shape)}')
+                    del finite
+            logger.warning(
+                f'vLLM sync finite check at global_step={self.state.global_step}: '
+                f'bad_params={bad_params}/{checked_params}, bad_elements={bad_elements}/{checked_elements}, '
+                f'examples={examples}')
+        if log_stats:
+            if not hasattr(self, '_geobench_sync_stats_prev'):
+                self._geobench_sync_stats_prev = {}
+            names = tuple(state_dict.keys())
+            group_key = (len(names), names[0] if names else '', names[-1] if names else '')
+            checked_params = 0
+            checked_elements = 0
+            total_sum = 0.0
+            total_abs_sum = 0.0
+            max_abs = 0.0
+            param_sums = {}
+            param_samples = {}
+            examples = []
+            sample_count = max(0, int(os.environ.get('GEOBENCH_VLLM_SYNC_SAMPLE_VALUES', '8')))
+            with torch.no_grad():
+                for name, param in state_dict.items():
+                    if not isinstance(param, torch.Tensor) or not torch.is_floating_point(param):
+                        continue
+                    tensor = param.detach().float()
+                    param_sum = float(tensor.sum().item())
+                    param_abs_sum = float(tensor.abs().sum().item())
+                    param_max_abs = float(tensor.abs().max().item()) if tensor.numel() else 0.0
+                    checked_params += 1
+                    checked_elements += tensor.numel()
+                    total_sum += param_sum
+                    total_abs_sum += param_abs_sum
+                    max_abs = max(max_abs, param_max_abs)
+                    param_sums[name] = param_sum
+                    if sample_count > 0 and tensor.numel():
+                        sample_size = min(sample_count, tensor.numel())
+                        flat = tensor.reshape(-1)
+                        if sample_size == 1:
+                            indices = torch.zeros(1, dtype=torch.long, device=flat.device)
+                        else:
+                            indices = (
+                                torch.arange(sample_size, dtype=torch.long, device=flat.device)
+                                * (tensor.numel() - 1)
+                                // (sample_size - 1))
+                        param_samples[name] = flat.index_select(0, indices).detach().cpu()
+                    if len(examples) < 3:
+                        examples.append(f'{name}: sum={param_sum:.6e}, abs_sum={param_abs_sum:.6e}')
+            previous = self._geobench_sync_stats_prev.get(group_key)
+            if previous is None:
+                logger.warning(
+                    f'vLLM sync stats at global_step={self.state.global_step}: '
+                    f'group={group_key}, params={checked_params}, elements={checked_elements}, '
+                    f'sum={total_sum:.6e}, abs_sum={total_abs_sum:.6e}, max_abs={max_abs:.6e}, '
+                    f'examples={examples}, previous=none')
+            else:
+                previous_sum, previous_abs_sum, previous_param_sums, previous_param_samples = (
+                    previous if len(previous) == 4 else (*previous, {}))
+                changed_param_sums = sum(
+                    1 for name, param_sum in param_sums.items()
+                    if abs(param_sum - previous_param_sums.get(name, float('nan'))) > 1e-6)
+                max_sum_delta = max(
+                    (abs(param_sum - previous_param_sums.get(name, param_sum)) for name, param_sum in param_sums.items()),
+                    default=0.0)
+                sample_values = 0
+                changed_sample_values = 0
+                max_sample_delta = 0.0
+                for name, sample in param_samples.items():
+                    prev_sample = previous_param_samples.get(name)
+                    if prev_sample is None or prev_sample.shape != sample.shape:
+                        continue
+                    delta = (sample - prev_sample).abs()
+                    sample_values += int(delta.numel())
+                    changed_sample_values += int((delta > 0).sum().item())
+                    max_sample_delta = max(max_sample_delta, float(delta.max().item()) if delta.numel() else 0.0)
+                logger.warning(
+                    f'vLLM sync stats at global_step={self.state.global_step}: '
+                    f'group={group_key}, params={checked_params}, elements={checked_elements}, '
+                    f'sum={total_sum:.6e}, abs_sum={total_abs_sum:.6e}, max_abs={max_abs:.6e}, '
+                    f'delta_sum={total_sum - previous_sum:.6e}, '
+                    f'delta_abs_sum={total_abs_sum - previous_abs_sum:.6e}, '
+                    f'changed_param_sums={changed_param_sums}/{len(param_sums)}, '
+                    f'max_sum_delta={max_sum_delta:.6e}, '
+                    f'changed_sample_values={changed_sample_values}/{sample_values}, '
+                    f'max_sample_delta={max_sample_delta:.6e}, examples={examples}')
+            self._geobench_sync_stats_prev[group_key] = (total_sum, total_abs_sum, param_sums, param_samples)
+
         if self.vllm_mode == 'server' and self.accelerator.is_main_process:
             use_flatten = getattr(self.args, 'enable_flattened_weight_sync', True)
             if use_flatten:

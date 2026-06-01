@@ -123,6 +123,7 @@ venv.bak/
 source.sh
 tensorboard.sh
 tools/geoscore_api_keys.conf
+tools/wandb_api_key.conf
 .DS_Store
 replace.sh
 result.png
@@ -154,3 +155,64 @@ megatron_output/
 
 # ast template
 ast_index_file.py
+
+.codex
+.codex-root-shell-fix
+.codex-tmux-debug
+.copilot
+.dotnet
+.local
+.vscode-server
+.vscode-server-root
+.vscode-cli-root
+.root-tmux
+.root-tmp
+.root-cache
+/models/
+
+# Local shell/network state
+/.bash_history
+/.root_zsh_history
+/.wget-hsts
+
+# GeoBench local datasets and generated schedules
+/*.jsonl
+/*.jsonl.*
+/all_selected_merged*.jsonl
+/output/
+/outputs/
+/wandb/
+/swanlog/
+/a4.txt
+/adsw.txt
+
+# Large model/checkpoint/data artifacts
+/checkpoints/
+/checkpoint*/
+/ckpt/
+/pretrained/
+/runs/
+*.safetensors
+*.bin
+*.ckpt
+*.onnx
+*.gguf
+*.npy
+*.npz
+*.arrow
+*.parquet
+*.h5
+*.hdf5
+
+# Local runtime/vendor experiments generated for cluster runs
+/tools/runtime/
+/tools/runtime_experiments/
+/tools/ori/
+
+# Local scratch notes/scripts
+/HANDOFF.md
+/a4.txt
+/adsw.txt
+/cosmos_cot.py
+/cosmos_cot*.sh
+/last_dsw.sh
