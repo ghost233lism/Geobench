@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/mnt/nas/zhangyiming/geobench}"
+REPO_ROOT="${REPO_ROOT:-/path/to/geobench}"
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
 export REPO_ROOT
 RUNTIME_DIR="${RUNTIME_DIR:-${REPO_ROOT}/tools/runtime}"
 GEOBENCH_RUNTIME_ROOT="${GEOBENCH_RUNTIME_ROOT:-${REPO_ROOT}/output/runtime}"
-CONDA_ENV_NAME="${CONDA_ENV_NAME:-cosmos}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-${CONDA_DEFAULT_ENV:-}}"
 CONDA_CLONE_SOURCE="${CONDA_CLONE_SOURCE:-last05}"
+ACTIVE_ENV_LABEL="${CONDA_ENV_NAME:-current Python environment}"
 REQUIRE_QWEN35_RUNTIME="${REQUIRE_QWEN35_RUNTIME:-false}"
 SKIP_RUNTIME_ENV_CHECK="${SKIP_RUNTIME_ENV_CHECK:-false}"
 QWEN35_TRANSFORMERS_VERSION="${QWEN35_TRANSFORMERS_VERSION:-5.2.0}"
 QWEN35_VLLM_VERSION="${QWEN35_VLLM_VERSION:-0.17.1}"
 WHEEL_DIR="${WHEEL_DIR:-${REPO_ROOT}/wheels}"
 RUN_NAME="${RUN_NAME:-geogrpo_cosmos_smoke}"
-MODEL="${MODEL:-/mnt/nas/zhangyiming/database/ckpt/pretrained/Qwen2.5-VL-7B-Instruct}"
+MODEL="${MODEL:-/path/to/model}"
 ROLLOUT_MODEL="${ROLLOUT_MODEL:-${GEOBENCH_RUNTIME_ROOT}/models/$(basename "${MODEL}")-vllm-compat}"
 TRAIN_MODEL="${TRAIN_MODEL:-${MODEL}}"
-INPUT_JSONL="${INPUT_JSONL:-${REPO_ROOT}/all_selected_merged_current_paths.jsonl}"
+INPUT_JSONL="${INPUT_JSONL:-/path/to/train_data.jsonl}"
 QWEN35_NO_TAGS="${QWEN35_NO_TAGS:-false}"
 case "${QWEN35_NO_TAGS,,}" in
   1|true|yes|on) qwen35_no_tags_enabled=true ;;
@@ -31,7 +32,7 @@ else
   QWEN35_USER_PROMPT="${QWEN35_USER_PROMPT:-<image> Based on the image, tell me the specific location and your thinking process. Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.}"
 fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/output/scheduled/${RUN_NAME}}"
-CHECKPOINT_OUTPUT_ROOT="${CHECKPOINT_OUTPUT_ROOT:-/mnt/data/zhangyiming/database/ckpt/geobench}"
+CHECKPOINT_OUTPUT_ROOT="${CHECKPOINT_OUTPUT_ROOT:-/path/to/checkpoints}"
 SWIFT_OUTPUT_DIR="${SWIFT_OUTPUT_DIR:-${CHECKPOINT_OUTPUT_ROOT}/${RUN_NAME}}"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/output/${RUN_NAME}/logs}"
 ROLLOUT_LOG="${ROLLOUT_LOG:-${LOG_DIR}/rollout.log}"
@@ -127,13 +128,15 @@ source "${REPO_ROOT}/tools/tracking_env.sh"
 geobench_configure_tracking "${RUN_NAME}"
 EXTRA_SWIFT_ARGS_TEXT="${EXTRA_SWIFT_ARGS_TEXT:---report_to ${REPORT_TO}}"
 
-if [[ -f /mnt/nas/zhangyiming/clash/env.sh ]]; then
+PROXY_ENV_SCRIPT="${PROXY_ENV_SCRIPT:-}"
+if [[ -n "${PROXY_ENV_SCRIPT}" && -f "${PROXY_ENV_SCRIPT}" ]]; then
   # shellcheck source=/dev/null
-  source /mnt/nas/zhangyiming/clash/env.sh auto >/dev/null 2>&1 || true
+  source "${PROXY_ENV_SCRIPT}" auto >/dev/null 2>&1 || true
 fi
-if [[ -f /root/miniconda3/etc/profile.d/conda.sh ]]; then
+CONDA_ROOT="${CONDA_ROOT:-/path/to/miniconda3}"
+if [[ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
   # shellcheck source=/dev/null
-  source /root/miniconda3/etc/profile.d/conda.sh
+  source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 fi
 export CONDA_NO_PLUGINS="${CONDA_NO_PLUGINS:-true}"
 export PYTHONPATH="${RUNTIME_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -144,7 +147,6 @@ env_exists() {
 
 cleanup_stale_runtime_processes() {
   local patterns=(
-    "/mnt/nas/zhangyiming/train/bash/cosmos_cot.py"
     "${GEOBENCH_RUNTIME_ROOT}/models/.*-vllm-compat"
     "Qwen3.5-9B-vllm-compat"
     "Qwen2.5-VL-7B-Instruct-vllm-compat"
@@ -238,11 +240,11 @@ if getattr(config, 'model_type', None) != 'qwen3_5':
 AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
 PY
   then
-    echo "Conda env ${CONDA_ENV_NAME} already has the required Qwen3.5 runtime imports."
+    echo "${ACTIVE_ENV_LABEL} already has the required Qwen3.5 runtime imports."
     return 0
   fi
 
-  echo "Installing Qwen3.5 runtime packages into ${CONDA_ENV_NAME}."
+  echo "Installing Qwen3.5 runtime packages into ${ACTIVE_ENV_LABEL}."
   # Qwen3.5 support needs a newer vLLM stack than the cloned 7B cosmos env.
   # Install it only inside the Qwen3.5 env; vLLM 0.17.1 pins torch 2.10.0
   # with CUDA 12.8 wheels, which avoids the ABI mismatch seen with torch 2.6.
@@ -274,17 +276,28 @@ PY
 }
 
 bootstrap_cosmos_env() {
-  if ! env_exists "${CONDA_ENV_NAME}"; then
-    echo "Conda env ${CONDA_ENV_NAME} not found on this runner; cloning ${CONDA_CLONE_SOURCE}."
-    if ! env_exists "${CONDA_CLONE_SOURCE}"; then
-      echo "Clone source conda env ${CONDA_CLONE_SOURCE} is not available." >&2
-      conda env list >&2
-      exit 1
+  if [[ -n "${CONDA_ENV_NAME}" ]]; then
+    if [[ "${CONDA_DEFAULT_ENV:-}" == "${CONDA_ENV_NAME}" && -n "${CONDA_PREFIX:-}" ]]; then
+      echo "Using already active Conda environment: ${CONDA_ENV_NAME} (${CONDA_PREFIX})."
+    else
+      if ! command -v conda >/dev/null 2>&1; then
+        echo "CONDA_ENV_NAME=${CONDA_ENV_NAME} was requested, but conda is unavailable." >&2
+        exit 1
+      fi
+      if ! env_exists "${CONDA_ENV_NAME}"; then
+        echo "Conda env ${CONDA_ENV_NAME} not found on this runner; cloning ${CONDA_CLONE_SOURCE}."
+        if ! env_exists "${CONDA_CLONE_SOURCE}"; then
+          echo "Clone source conda env ${CONDA_CLONE_SOURCE} is not available." >&2
+          conda env list >&2
+          exit 1
+        fi
+        CONDA_NO_PLUGINS=true conda create --offline -n "${CONDA_ENV_NAME}" --clone "${CONDA_CLONE_SOURCE}" -y
+      fi
+      conda activate "${CONDA_ENV_NAME}"
     fi
-    CONDA_NO_PLUGINS=true conda create --offline -n "${CONDA_ENV_NAME}" --clone "${CONDA_CLONE_SOURCE}" -y
+  else
+    echo "Using current Python environment: $(python -c 'import sys; print(sys.prefix)')."
   fi
-
-  conda activate "${CONDA_ENV_NAME}"
   python -m pip install -e "${REPO_ROOT}" --no-deps --no-build-isolation
 
   if [[ "${SKIP_RUNTIME_ENV_CHECK}" == "true" || "${SKIP_RUNTIME_ENV_CHECK}" == "1" ]]; then
@@ -320,11 +333,11 @@ if tuple(int(part) for part in version('trl').split('.')[:2]) < (0, 20):
     raise RuntimeError(f'trl is below ms-swift RLHF requirement: {version("trl")}')
 PY
   then
-    echo "Conda env ${CONDA_ENV_NAME} already has the required GeoBench runtime imports."
+    echo "${ACTIVE_ENV_LABEL} already has the required GeoBench runtime imports."
     return 0
   fi
 
-  echo "Installing GeoBench runtime packages into ${CONDA_ENV_NAME}."
+  echo "Installing GeoBench runtime packages into ${ACTIVE_ENV_LABEL}."
   python -m pip install "qwen_vl_utils>=0.0.14" peft==0.18.1 "datasets<4.0" deepspeed "gradio>=3.40.0,<5.33" nltk "trl>=0.20,<0.21" mergekit
   python -m pip install modelscope binpacking cpm-kernels dacite json-repair openai oss2 rouge \
     sentencepiece simplejson sortedcontainers tensorboard tiktoken transformers-stream-generator zstandard pyecharts
@@ -387,7 +400,7 @@ export IMAGE_MAX_TOKEN_NUM
 export min_pixels="${GEOBENCH_QWEN2VL_MIN_PIXELS}"
 export max_pixels="${GEOBENCH_QWEN2VL_MAX_PIXELS}"
 
-CONDA_ENV_PREFIX="${CONDA_PREFIX:-/root/miniconda3/envs/cosmos}"
+CONDA_ENV_PREFIX="${CONDA_PREFIX:-${VIRTUAL_ENV:-$(python -c 'import sys; print(sys.prefix)')}}"
 if [[ -z "${CUDA_HOME:-}" || ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
   for cuda_candidate in /usr/local/cuda /usr/local/cuda-12.4 /usr/local/cuda-12 /usr/local/cuda-*; do
     if [[ -x "${cuda_candidate}/bin/nvcc" ]]; then
@@ -398,7 +411,8 @@ if [[ -z "${CUDA_HOME:-}" || ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
 fi
 export CUDA_HOME="${CUDA_HOME:-${CONDA_ENV_PREFIX}}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
-CURAND_LIB_DIR="${CONDA_ENV_PREFIX}/lib/python3.10/site-packages/nvidia/curand/lib"
+PYTHON_SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+CURAND_LIB_DIR="${PYTHON_SITE_PACKAGES}/nvidia/curand/lib"
 if [[ -d "${CURAND_LIB_DIR}" ]]; then
   export LIBRARY_PATH="${CURAND_LIB_DIR}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
   export LD_LIBRARY_PATH="${CURAND_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"

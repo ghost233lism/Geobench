@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/mnt/nas/zhangyiming/geobench}"
+REPO_ROOT="${REPO_ROOT:-/path/to/geobench}"
 REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
+export REPO_ROOT
 RUN_SCRIPT="${RUN_SCRIPT:-${REPO_ROOT}/tools/run_geogrpo_A100_cosmos.sh}"
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
 USER_RUN_NAME="${RUN_NAME:-}"
-export CHECKPOINT_OUTPUT_ROOT="${CHECKPOINT_OUTPUT_ROOT:-/mnt/data/zhangyiming/database/ckpt/geobench}"
+export CHECKPOINT_OUTPUT_ROOT="${CHECKPOINT_OUTPUT_ROOT:-/path/to/checkpoints}"
 export OFFLOAD_CHECKPOINTS="${OFFLOAD_CHECKPOINTS:-false}"
-export INPUT_JSONL="${INPUT_JSONL:-${REPO_ROOT}/all_selected_merged_current_paths.jsonl}"
+export INPUT_JSONL="${INPUT_JSONL:-/path/to/train_data.jsonl}"
 export TRAIN_DATA_RATIO="${TRAIN_DATA_RATIO:-1.0}"
-export MODEL="${MODEL:-${REPO_ROOT}/models/Qwen3.5-9B}"
+export MODEL="${MODEL:-/path/to/Qwen3.5-9B}"
 export QWEN35_NO_TAGS="${QWEN35_NO_TAGS:-true}"
 case "${QWEN35_NO_TAGS,,}" in
   1|true|yes|on) qwen35_no_tags_enabled=true ;;
   *) qwen35_no_tags_enabled=false ;;
 esac
 
-export CONDA_ENV_NAME="${CONDA_ENV_NAME:-qwen35b}"
+export CONDA_ENV_NAME="${CONDA_ENV_NAME:-${CONDA_DEFAULT_ENV:-}}"
 export CONDA_CLONE_SOURCE="${CONDA_CLONE_SOURCE:-cosmos}"
 export REQUIRE_QWEN35_RUNTIME="${REQUIRE_QWEN35_RUNTIME:-false}"
 export SKIP_RUNTIME_ENV_CHECK="${SKIP_RUNTIME_ENV_CHECK:-true}"

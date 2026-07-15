@@ -15,7 +15,7 @@ export OFFLOAD_CHECKPOINTS="${OFFLOAD_CHECKPOINTS:-false}"
 export INPUT_JSONL="${INPUT_JSONL:-${REPO_ROOT}/all_selected_merged_current_paths.jsonl}"
 export MODEL="${MODEL:-${REPO_ROOT}/models/Qwen3.5-9B}"
 
-export CONDA_ENV_NAME="${CONDA_ENV_NAME:-qwen35b}"
+export CONDA_ENV_NAME="${CONDA_ENV_NAME:-${CONDA_DEFAULT_ENV:-}}"
 export CONDA_CLONE_SOURCE="${CONDA_CLONE_SOURCE:-cosmos}"
 export REQUIRE_QWEN35_RUNTIME="${REQUIRE_QWEN35_RUNTIME:-false}"
 export SKIP_RUNTIME_ENV_CHECK="${SKIP_RUNTIME_ENV_CHECK:-true}"

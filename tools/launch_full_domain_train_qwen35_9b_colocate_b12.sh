@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Train all 10 GeoBench domains one by one from the base model.
+# Train all 10 GeoBench domains one by one from the base model with 4-GPU colocate rollout.
 # Each domain uses full data and the internal four-stage difficulty schedule.
 # Set START_DOMAIN=remote to resume from a later domain without rerunning earlier ones.
 # Set SKIP_DOMAINS="remote,map" (comma or space separated) to omit domains.
 
 REPO_ROOT="${REPO_ROOT:-/path/to/geobench}"
 export REPO_ROOT
-LAUNCHER="${LAUNCHER:-${REPO_ROOT}/tools/launch_geogrpo_qwen35_9b_6p2_b8.sh}"
+LAUNCHER="${LAUNCHER:-${REPO_ROOT}/tools/launch_geogrpo_qwen35_9b_colocate_b12.sh}"
 SOURCE_JSONL="${INPUT_JSONL:-/path/to/train_data.jsonl}"
 SPLIT_ROOT="${SPLIT_ROOT:-${REPO_ROOT}/output/domain_inputs/full_10domain}"
 RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/output/domain_full_runs}"
@@ -125,7 +125,7 @@ PY
 
 run_domain() {
   local domain="$1"
-  local run_name="geogrpo_qwen35_9b_6p2_b8_full_${domain}_four_stage_${RUN_STAMP}"
+  local run_name="geogrpo_qwen35_9b_colocate_b12_full_${domain}_four_stage_${RUN_STAMP}"
   local log_path="${RUN_ROOT}/${run_name}.log"
   local status
 
