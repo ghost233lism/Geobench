@@ -24,4 +24,5 @@ REPO_ROOT=/actual/path/to/Geobench \
 MODEL=/actual/path/to/Qwen3.5-9B \
 INPUT_JSONL=/actual/path/to/train_data.jsonl \
 CHECKPOINT_OUTPUT_ROOT=/actual/path/to/checkpoints \
+SKIP_DOMAINS=street \
 bash tools/launch_full_domain_train_qwen35_9b_colocate_b12.sh
