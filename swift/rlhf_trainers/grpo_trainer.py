@@ -97,6 +97,7 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         reward_templates = kwargs.pop('reward_template', None)
         self._prepare_algorithm_params()
         super().__init__(model, ref_model, *_args, **kwargs)
+        self._patch_geobench_qwen35_zero3_conv1d(self.model)
         self._prepare_geobench_grad_debug_hooks()
         self._prepare_chord_dataset()
         self.prepare_rollout()
@@ -155,6 +156,54 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self._buffered_inputs = None
         self._current_train_step_time = 0.0
 
+    def _patch_geobench_qwen35_zero3_conv1d(self, model: torch.nn.Module) -> None:
+        if os.environ.get('GEOBENCH_PATCH_QWEN35_ZERO3_CONV1D', '1') in {'0', 'false', 'False'}:
+            return
+        if getattr(self, '_geobench_qwen35_zero3_conv1d_patched', False):
+            return
+
+        patched_modules = 0
+        sample_shapes = []
+        disable_fast_path = os.environ.get('GEOBENCH_DISABLE_QWEN35_CAUSAL_CONV1D', '1') not in {
+            '0', 'false', 'False'
+        }
+
+        torch_update = None
+        try:
+            from transformers.models.qwen3_5 import modeling_qwen3_5
+
+            torch_update = getattr(modeling_qwen3_5, 'torch_causal_conv1d_update', None)
+        except Exception:
+            pass
+
+        unwrapped_model = self.accelerator.unwrap_model(model) if hasattr(self, 'accelerator') else model
+        for module in unwrapped_model.modules():
+            class_name = module.__class__.__name__
+            if class_name not in {'Qwen3_5GatedDeltaNet', 'Qwen3_5MoeGatedDeltaNet'}:
+                continue
+            if disable_fast_path and hasattr(module, 'causal_conv1d_fn'):
+                module.causal_conv1d_fn = None
+            if torch_update is not None and hasattr(module, 'causal_conv1d_update'):
+                module.causal_conv1d_update = torch_update
+            if hasattr(module, 'conv1d'):
+                try:
+                    import deepspeed
+
+                    deepspeed.zero.register_external_parameter(module, module.conv1d.weight)
+                except Exception:
+                    pass
+                if len(sample_shapes) < 4:
+                    sample_shapes.append(tuple(module.conv1d.weight.shape))
+            patched_modules += 1
+
+        self._geobench_qwen35_zero3_conv1d_patched = True
+        if patched_modules or os.environ.get('GEOBENCH_LOG_SITECUSTOMIZE', '').lower() in {'1', 'true', 'yes', 'on'}:
+            rank = getattr(self.accelerator, 'process_index', -1) if hasattr(self, 'accelerator') else -1
+            logger.warning(
+                f'GeoBench Qwen3.5 ZeRO-3 conv1d patch rank={rank}: '
+                f'patched_modules={patched_modules}, disable_fast_path={disable_fast_path}, '
+                f'sample_conv_shapes={sample_shapes}')
+
     def _prepare_geobench_grad_debug_hooks(self):
         detect_anomaly = os.environ.get('GEOBENCH_TORCH_DETECT_ANOMALY', '').lower() in {
             '1', 'true', 'yes', 'on'
@@ -196,10 +245,8 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     grad_f = grad.detach().float()
                     finite = torch.isfinite(grad_f)
                     nonfinite = int((~finite).sum().item())
-                    if not enable_logging_hooks:
-                        return grad
                     should_log = log_all or nonfinite > 0
-                    if should_log and self._geobench_param_grad_hook_logs < max_logs:
+                    if enable_logging_hooks and should_log and self._geobench_param_grad_hook_logs < max_logs:
                         self._geobench_param_grad_hook_logs += 1
                         if finite.any():
                             finite_values = grad_f[finite]
@@ -220,13 +267,15 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
                         raise RuntimeError(
                             f'GeoBench aborting on nonfinite gradient for {param_name}: '
                             f'nonfinite={nonfinite}/{grad.numel()}')
+                    if nonfinite > 0 and enable_stabilize_hooks:
+                        grad = torch.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
                 return grad
 
             self._geobench_param_grad_hook_handles.append(parameter.register_hook(_hook))
 
         logger.warning(
             f'GeoBench registered {len(self._geobench_param_grad_hook_handles)} parameter gradient hooks '
-            f'(logging={enable_logging_hooks}).')
+            f'(logging={enable_logging_hooks}, stabilize={enable_stabilize_hooks}).')
 
     def _get_data_collator(self, args, template):
         return identity_data_collator
@@ -1733,6 +1782,7 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             model_inputs['logits_to_keep'] = logits_to_keep + 1
 
         # Forward pass
+        self._patch_geobench_qwen35_zero3_conv1d(model)
         logits = model(**model_inputs).logits
 
         # Extract relevant portion and apply temperature

@@ -21,7 +21,8 @@ from .patch import patch_auto_config, patch_auto_tokenizer
 from .protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
                        ChatCompletionStreamResponse, ChatMessage, DeltaMessage, EmbeddingResponse,
                        EmbeddingResponseData, InferRequest, RequestConfig, random_uuid)
-from .utils import AdapterRequest, InferStreamer, patch_npu_vllm, patch_vllm_memory_leak
+from .utils import (AdapterRequest, InferStreamer, patch_npu_vllm, patch_vllm_memory_leak,
+                    patch_vllm_transformers_compat)
 
 logger = get_logger()
 try:
@@ -136,6 +137,7 @@ class VllmEngine(InferEngine):
         self.num_labels = num_labels
         self.reranker_use_activation = reranker_use_activation
 
+        patch_vllm_transformers_compat()
         patch_vllm_memory_leak()
         self._adapters_pool = {}
         if template is None:

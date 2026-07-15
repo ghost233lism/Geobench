@@ -216,3 +216,10 @@ ast_index_file.py
 /cosmos_cot.py
 /cosmos_cot*.sh
 /last_dsw.sh
+
+
+/GeoVerse-Val/eval_runs
+/GeoVerse-Val/geobench-val
+/GeoVerse-Val/evaluate
+a*.txt
+*.readonly

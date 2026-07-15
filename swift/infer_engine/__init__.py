@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .protocol import ChatCompletionResponse, Function, InferRequest, RequestConfig
     from .sglang_engine import SglangEngine
     from .transformers_engine import TransformersEngine
-    from .utils import AdapterRequest, patch_vllm_memory_leak, prepare_generation_config
+    from .utils import AdapterRequest, patch_vllm_memory_leak, patch_vllm_transformers_compat, prepare_generation_config
     from .vllm_engine import VllmEngine
 else:
     _import_structure = {
@@ -24,7 +24,8 @@ else:
         'infer_client': ['InferClient'],
         'infer_engine': ['InferEngine'],
         'base': ['BaseInferEngine'],
-        'utils': ['prepare_generation_config', 'AdapterRequest', 'patch_vllm_memory_leak'],
+        'utils': ['prepare_generation_config', 'AdapterRequest', 'patch_vllm_memory_leak',
+                  'patch_vllm_transformers_compat'],
         'protocol': ['InferRequest', 'RequestConfig', 'Function', 'ChatCompletionResponse'],
     }
 

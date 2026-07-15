@@ -469,6 +469,9 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         log_stats = os.environ.get('GEOBENCH_LOG_VLLM_SYNC_STATS', '').lower() in {
             '1', 'true', 'yes', 'on'
         }
+        abort_on_nonfinite = os.environ.get('GEOBENCH_ABORT_ON_NONFINITE_VLLM_SYNC', '').lower() in {
+            '1', 'true', 'yes', 'on'
+        }
         if log_finite:
             checked_params = 0
             checked_elements = 0
@@ -493,6 +496,11 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
                 f'vLLM sync finite check at global_step={self.state.global_step}: '
                 f'bad_params={bad_params}/{checked_params}, bad_elements={bad_elements}/{checked_elements}, '
                 f'examples={examples}')
+            if bad_params and abort_on_nonfinite:
+                raise RuntimeError(
+                    f'GeoBench aborting before vLLM weight sync at global_step={self.state.global_step}: '
+                    f'bad_params={bad_params}/{checked_params}, bad_elements={bad_elements}/{checked_elements}, '
+                    f'examples={examples}')
         if log_stats:
             if not hasattr(self, '_geobench_sync_stats_prev'):
                 self._geobench_sync_stats_prev = {}

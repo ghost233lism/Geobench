@@ -621,6 +621,59 @@ class GeoStrictFormat(ORM):
         return rewards
 
 
+class GeoJSONStrictFormat(ORM):
+    EMPTY_THINK_PREFIX_RE = re.compile(r'^\s*<think>\s*</think>\s*', re.S | re.I)
+
+    @staticmethod
+    def _strip_special_tokens(content: str) -> str:
+        return re.sub(r'\s*<\|im_end\|>\s*$', '', content.strip())
+
+    @classmethod
+    def _strip_auto_think_prefix(cls, content: str) -> str:
+        return cls.EMPTY_THINK_PREFIX_RE.sub('', content, count=1)
+
+    def __call__(self, completions, **kwargs) -> List[float]:
+        """Check JSON answer format and ignore Qwen's empty no-thinking prefix."""
+        rewards = []
+        for content in completions:
+            content = self._strip_special_tokens(content)
+            content = self._strip_auto_think_prefix(content)
+            if GeoNoUnknown.REFUSAL_RE.search(content):
+                rewards.append(0.0)
+                continue
+
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                rewards.append(0.0)
+                continue
+
+            if not isinstance(data, dict) or set(data) != {'Clues', 'Reasoning', 'FinalAnswer'}:
+                rewards.append(0.0)
+                continue
+
+            clues = data.get('Clues')
+            reasoning = data.get('Reasoning')
+            final_answer = data.get('FinalAnswer')
+            if (
+                not isinstance(clues, list)
+                or not clues
+                or not all(isinstance(item, str) and item.strip() for item in clues)
+                or not isinstance(reasoning, str)
+                or not reasoning.strip()
+                or not isinstance(final_answer, str)
+            ):
+                rewards.append(0.0)
+                continue
+            if GeoNoUnknown.FINAL_BANNED_RE.search(final_answer):
+                rewards.append(0.0)
+                continue
+
+            parts = [part.strip() for part in re.split(r'[;；]', final_answer) if part.strip()]
+            rewards.append(1.0 if len(parts) == 3 else 0.0)
+        return rewards
+
+
 class GeoScoreAccuracy(ORM):
     """基于OpenCage API的GeoScore准确性奖励函数。
 
@@ -1288,5 +1341,8 @@ orms = {
     'geo_format': GeoAnswerFormat,
     'geo_no_unknown': GeoNoUnknown,
     'geo_strict_format': GeoStrictFormat,
+    'geo_json_strict_format': GeoJSONStrictFormat,
+    'geo_formatstrict': GeoJSONStrictFormat,
+    'formatstrict': GeoJSONStrictFormat,
     'geoscore_accuracy':GeoScoreAccuracy,
 }

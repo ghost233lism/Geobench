@@ -9,6 +9,7 @@ GEOBENCH_RUNTIME_ROOT="${GEOBENCH_RUNTIME_ROOT:-${REPO_ROOT}/output/runtime}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-cosmos}"
 CONDA_CLONE_SOURCE="${CONDA_CLONE_SOURCE:-last05}"
 REQUIRE_QWEN35_RUNTIME="${REQUIRE_QWEN35_RUNTIME:-false}"
+SKIP_RUNTIME_ENV_CHECK="${SKIP_RUNTIME_ENV_CHECK:-false}"
 QWEN35_TRANSFORMERS_VERSION="${QWEN35_TRANSFORMERS_VERSION:-5.2.0}"
 QWEN35_VLLM_VERSION="${QWEN35_VLLM_VERSION:-0.17.1}"
 WHEEL_DIR="${WHEEL_DIR:-${REPO_ROOT}/wheels}"
@@ -17,7 +18,18 @@ MODEL="${MODEL:-/mnt/nas/zhangyiming/database/ckpt/pretrained/Qwen2.5-VL-7B-Inst
 ROLLOUT_MODEL="${ROLLOUT_MODEL:-${GEOBENCH_RUNTIME_ROOT}/models/$(basename "${MODEL}")-vllm-compat}"
 TRAIN_MODEL="${TRAIN_MODEL:-${MODEL}}"
 INPUT_JSONL="${INPUT_JSONL:-${REPO_ROOT}/all_selected_merged_current_paths.jsonl}"
-SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-${REPO_ROOT}/tools/system_prompt.txt}"
+QWEN35_NO_TAGS="${QWEN35_NO_TAGS:-false}"
+case "${QWEN35_NO_TAGS,,}" in
+  1|true|yes|on) qwen35_no_tags_enabled=true ;;
+  *) qwen35_no_tags_enabled=false ;;
+esac
+if [[ "${qwen35_no_tags_enabled}" == "true" ]]; then
+  SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-${REPO_ROOT}/tools/system_prompt_compact_no_think.txt}"
+  QWEN35_USER_PROMPT="${QWEN35_USER_PROMPT:-<image> Based on the image, reason carefully about the visual clues and tell me the specific location. Output only the required JSON.}"
+else
+  SYSTEM_PROMPT_FILE="${SYSTEM_PROMPT_FILE:-${REPO_ROOT}/tools/system_prompt.txt}"
+  QWEN35_USER_PROMPT="${QWEN35_USER_PROMPT:-<image> Based on the image, tell me the specific location and your thinking process. Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.}"
+fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/output/scheduled/${RUN_NAME}}"
 CHECKPOINT_OUTPUT_ROOT="${CHECKPOINT_OUTPUT_ROOT:-/mnt/data/zhangyiming/database/ckpt/geobench}"
 SWIFT_OUTPUT_DIR="${SWIFT_OUTPUT_DIR:-${CHECKPOINT_OUTPUT_ROOT}/${RUN_NAME}}"
@@ -48,19 +60,26 @@ ROLLOUT_PORT="${ROLLOUT_PORT:-auto}"
 ROLLOUT_WAIT_SECONDS="${ROLLOUT_WAIT_SECONDS:-900}"
 MIN_ROLLOUT_GPU_FREE_MB="${MIN_ROLLOUT_GPU_FREE_MB:-20000}"
 TRAIN_DONE_GRACE_SECONDS="${TRAIN_DONE_GRACE_SECONDS:-20}"
+ROLLOUT_CLEANUP_GRACE_SECONDS="${ROLLOUT_CLEANUP_GRACE_SECONDS:-10}"
 
 QWEN_ENABLE_THINKING="${QWEN_ENABLE_THINKING:-false}"
 QWEN_RESPONSE_PREFIX="${QWEN_RESPONSE_PREFIX:-}"
 ROLLOUT_TEMPLATE="${ROLLOUT_TEMPLATE:-qwen2_5_vl}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
+TRAIN_DATA_RATIO="${TRAIN_DATA_RATIO:-1.0}"
 SCHEDULE="${SCHEDULE:-four_stage}"
 DOMAIN_BALANCE="${DOMAIN_BALANCE:-ratio}"
 DOMAIN_RATIO_TEXT="${DOMAIN_RATIO_TEXT:-}"
+DOMAIN_ORDER_TEXT="${DOMAIN_ORDER_TEXT:-}"
 NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-1}"
 MAX_LENGTH="${MAX_LENGTH:-3072}"
-MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-768}"
+if [[ "${qwen35_no_tags_enabled}" == "true" ]]; then
+  MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-256}"
+else
+  MAX_COMPLETION_LENGTH="${MAX_COMPLETION_LENGTH:-768}"
+fi
 MAX_PIXELS="${MAX_PIXELS:-262144}"
 IMAGE_MIN_TOKEN_NUM="${IMAGE_MIN_TOKEN_NUM:-4}"
 IMAGE_MAX_TOKEN_NUM="${IMAGE_MAX_TOKEN_NUM:-512}"
@@ -72,24 +91,29 @@ VIT_GRADIENT_CHECKPOINTING="${VIT_GRADIENT_CHECKPOINTING:-false}"
 SAVE_STRATEGY="${SAVE_STRATEGY:-steps}"
 SAVE_STEPS="${SAVE_STEPS:-20}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-2}"
-TEMPERATURE="${TEMPERATURE:-0.7}"
+TEMPERATURE="${TEMPERATURE:-0.9}"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
-LEARNING_RATE="${LEARNING_RATE:-1e-5}"
-WARMUP_RATIO="${WARMUP_RATIO:-0.01}"
-BETA="${BETA:-0.001}"
-MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
+LEARNING_RATE="${LEARNING_RATE:-1e-6}"
+WARMUP_RATIO="${WARMUP_RATIO:-0.05}"
+BETA="${BETA:-0.04}"
+MAX_GRAD_NORM="${MAX_GRAD_NORM:-2.0}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-${ROLLOUT_VLLM_GPU_MEMORY_UTILIZATION}}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-${ROLLOUT_TENSOR_PARALLEL_SIZE}}"
 MOVE_MODEL_BATCHES="${MOVE_MODEL_BATCHES:-8}"
 SLEEP_LEVEL="${SLEEP_LEVEL:-1}"
-REWARD_FUNCS_TEXT="${REWARD_FUNCS_TEXT:-format geo_format repetition soft_overlong}"
-REWARD_WEIGHTS_TEXT="${REWARD_WEIGHTS_TEXT:-1.0 1.0 0.2 0.2}"
+if [[ "${qwen35_no_tags_enabled}" == "true" ]]; then
+  REWARD_FUNCS_TEXT="${REWARD_FUNCS_TEXT:-geoscore_accuracy formatstrict}"
+  REWARD_WEIGHTS_TEXT="${REWARD_WEIGHTS_TEXT:-2.0 1.0}"
+else
+  REWARD_FUNCS_TEXT="${REWARD_FUNCS_TEXT:-geoscore_accuracy geo_strict_format geo_no_unknown}"
+  REWARD_WEIGHTS_TEXT="${REWARD_WEIGHTS_TEXT:-2.0 1.0 1.0}"
+fi
 GEOSCORE_API_KEY_CONFIG="${GEOSCORE_API_KEY_CONFIG:-${REPO_ROOT}/tools/geoscore_api_keys.conf}"
 if [[ -f "${GEOSCORE_API_KEY_CONFIG}" ]]; then
   # shellcheck source=/dev/null
   source "${GEOSCORE_API_KEY_CONFIG}"
 fi
-GEOSCORE_MAX_DISTANCE="${GEOSCORE_MAX_DISTANCE:-2000.0}"
+GEOSCORE_MAX_DISTANCE="${GEOSCORE_MAX_DISTANCE:-18050.0}"
 GEOSCORE_CACHE_FILE="${GEOSCORE_CACHE_FILE:-${LOG_DIR}/geoscore_cache.json}"
 GEOSCORE_API_KEY_ARGS=()
 if [[ -n "${GEOSCORE_API_KEYS:-}" ]]; then
@@ -263,6 +287,11 @@ bootstrap_cosmos_env() {
   conda activate "${CONDA_ENV_NAME}"
   python -m pip install -e "${REPO_ROOT}" --no-deps --no-build-isolation
 
+  if [[ "${SKIP_RUNTIME_ENV_CHECK}" == "true" || "${SKIP_RUNTIME_ENV_CHECK}" == "1" ]]; then
+    echo "Skipping runtime import checks and package installation."
+    return 0
+  fi
+
   if [[ "${REQUIRE_QWEN35_RUNTIME}" == "true" || "${REQUIRE_QWEN35_RUNTIME}" == "1" ]]; then
     ensure_qwen35_runtime
     python -m pip install -e "${REPO_ROOT}" --no-deps --no-build-isolation
@@ -382,9 +411,17 @@ MAX_SAMPLES_ARGS=()
 if [[ -n "${MAX_SAMPLES}" && "${MAX_SAMPLES}" != "0" && "${MAX_SAMPLES}" != "all" ]]; then
   MAX_SAMPLES_ARGS=(--max-samples "${MAX_SAMPLES}")
 fi
+TRAIN_DATA_RATIO_ARGS=()
+if [[ -n "${TRAIN_DATA_RATIO}" && "${TRAIN_DATA_RATIO}" != "1" && "${TRAIN_DATA_RATIO}" != "1.0" && "${TRAIN_DATA_RATIO}" != "100%" && "${TRAIN_DATA_RATIO}" != "all" ]]; then
+  TRAIN_DATA_RATIO_ARGS=(--train-data-ratio "${TRAIN_DATA_RATIO}")
+fi
 DOMAIN_RATIO_ARGS=()
 if [[ -n "${DOMAIN_RATIO_TEXT}" ]]; then
   DOMAIN_RATIO_ARGS=(--domain-ratio "${DOMAIN_RATIO_TEXT}")
+fi
+DOMAIN_ORDER_ARGS=()
+if [[ -n "${DOMAIN_ORDER_TEXT}" ]]; then
+  DOMAIN_ORDER_ARGS=(--domain-order "${DOMAIN_ORDER_TEXT}")
 fi
 
 prepare_vllm_compat_model() {
@@ -472,19 +509,68 @@ PY
 }
 
 cleanup_rollout() {
-  if [[ -n "${ROLLOUT_PGID:-}" ]] && kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1; then
-    echo "Stopping rollout process group pgid=${ROLLOUT_PGID}"
-    kill -TERM -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || true
-    for _ in {1..10}; do
-      kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || break
-      sleep 1
-    done
-    kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 && kill -KILL -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || true
+  if [[ -z "${ROLLOUT_PGID:-}" && -z "${ROLLOUT_PID:-}" ]]; then
+    return 0
   fi
+
+  local self_pgid=""
+  self_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  local can_kill_group=0
+  if [[ -n "${ROLLOUT_PGID:-}" && "${ROLLOUT_PGID}" != "${self_pgid}" ]] \
+      && kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1; then
+    can_kill_group=1
+  fi
+
+  echo "Stopping rollout process group pgid=${ROLLOUT_PGID:-unknown} pid=${ROLLOUT_PID:-unknown}"
+  if [[ "${can_kill_group}" -eq 1 ]]; then
+    kill -TERM -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || true
+  elif [[ -n "${ROLLOUT_PID:-}" ]]; then
+    kill -TERM "${ROLLOUT_PID}" >/dev/null 2>&1 || true
+  fi
+
+  for ((i = 0; i < ROLLOUT_CLEANUP_GRACE_SECONDS; i++)); do
+    if [[ "${can_kill_group}" -eq 1 ]]; then
+      kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || {
+        echo "Rollout process group stopped."
+        return 0
+      }
+    elif [[ -n "${ROLLOUT_PID:-}" ]]; then
+      kill -0 "${ROLLOUT_PID}" >/dev/null 2>&1 || {
+        echo "Rollout process stopped."
+        return 0
+      }
+    else
+      echo "Rollout cleanup complete."
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Rollout still alive after ${ROLLOUT_CLEANUP_GRACE_SECONDS}s; forcing kill."
+  if [[ "${can_kill_group}" -eq 1 ]]; then
+    kill -KILL -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || true
+  elif [[ -n "${ROLLOUT_PID:-}" ]]; then
+    kill -KILL "${ROLLOUT_PID}" >/dev/null 2>&1 || true
+  fi
+
+  for _ in {1..5}; do
+    if [[ "${can_kill_group}" -eq 1 ]]; then
+      kill -0 -- "-${ROLLOUT_PGID}" >/dev/null 2>&1 || break
+    elif [[ -n "${ROLLOUT_PID:-}" ]]; then
+      kill -0 "${ROLLOUT_PID}" >/dev/null 2>&1 || break
+    else
+      break
+    fi
+    sleep 1
+  done
+  echo "Rollout cleanup complete."
 }
 
 cleanup_training() {
-  if [[ -n "${TRAIN_PGID:-}" ]] && kill -0 -- "-${TRAIN_PGID}" >/dev/null 2>&1; then
+  local self_pgid=""
+  self_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  if [[ -n "${TRAIN_PGID:-}" && "${TRAIN_PGID}" != "${self_pgid}" ]] \
+      && kill -0 -- "-${TRAIN_PGID}" >/dev/null 2>&1; then
     echo "Stopping training process group pgid=${TRAIN_PGID}"
     kill -TERM -- "-${TRAIN_PGID}" >/dev/null 2>&1 || true
     for _ in {1..10}; do
@@ -492,6 +578,11 @@ cleanup_training() {
       sleep 1
     done
     kill -0 -- "-${TRAIN_PGID}" >/dev/null 2>&1 && kill -KILL -- "-${TRAIN_PGID}" >/dev/null 2>&1 || true
+  elif [[ -n "${TRAIN_PID:-}" ]] && kill -0 "${TRAIN_PID}" >/dev/null 2>&1; then
+    echo "Stopping training process pid=${TRAIN_PID}"
+    kill -TERM "${TRAIN_PID}" >/dev/null 2>&1 || true
+    sleep 3
+    kill -0 "${TRAIN_PID}" >/dev/null 2>&1 && kill -KILL "${TRAIN_PID}" >/dev/null 2>&1 || true
   fi
 }
 
@@ -536,10 +627,12 @@ stop_checkpoint_offloader() {
 
 cleanup_all() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT INT
+  trap '' TERM
   cleanup_training
   stop_checkpoint_offloader
   cleanup_rollout
+  trap - TERM
   return "${status}"
 }
 
@@ -571,6 +664,8 @@ echo "Training GPUs: ${TRAIN_CUDA_VISIBLE_DEVICES}; rollout GPUs: ${ROLLOUT_CUDA
 echo "Rollout config: port=${ROLLOUT_PORT}, tp=${ROLLOUT_TENSOR_PARALLEL_SIZE}, gpu_memory=${ROLLOUT_VLLM_GPU_MEMORY_UTILIZATION}, max_model_len=${ROLLOUT_VLLM_MAX_MODEL_LEN}, max_num_seqs=${ROLLOUT_VLLM_MAX_NUM_SEQS}, enforce_eager=${ROLLOUT_VLLM_ENFORCE_EAGER}, max_pixels=${GEOBENCH_QWEN2VL_MAX_PIXELS}, image_token_range=${IMAGE_MIN_TOKEN_NUM}-${IMAGE_MAX_TOKEN_NUM}"
 echo "Colocate config: tp=${VLLM_TENSOR_PARALLEL_SIZE}, gpu_memory=${VLLM_GPU_MEMORY_UTILIZATION}, move_model_batches=${MOVE_MODEL_BATCHES}"
 echo "Training config: num_generations=${NUM_GENERATIONS}, batch=${PER_DEVICE_TRAIN_BATCH_SIZE}, max_length=${MAX_LENGTH}, max_completion_length=${MAX_COMPLETION_LENGTH}, learning_rate=${LEARNING_RATE}, beta=${BETA}"
+echo "Data selection: train_data_ratio=${TRAIN_DATA_RATIO}, max_samples=${MAX_SAMPLES:-all}, schedule=${SCHEDULE}, domain_balance=${DOMAIN_BALANCE}, domain_ratio=${DOMAIN_RATIO_TEXT:-default}, domain_order=${DOMAIN_ORDER_TEXT:-default}"
+echo "Qwen3.5 no-tags JSON mode: ${QWEN35_NO_TAGS}; enable_thinking=${QWEN_ENABLE_THINKING}; system_prompt=${SYSTEM_PROMPT_FILE}; user_prompt=${QWEN35_USER_PROMPT}"
 echo "Rewards: ${REWARD_FUNCS_TEXT}"
 echo "GeoScore API keys configured: ${#GEOSCORE_API_KEY_ARGS[@]}; cache=${GEOSCORE_CACHE_FILE}; max_distance=${GEOSCORE_MAX_DISTANCE}"
 
@@ -647,12 +742,15 @@ setsid bash -c 'set -o pipefail; python "$@" 2>&1 | tee "${TRAIN_LOG}"' bash too
   --input "${INPUT_JSONL}" \
   --model "${TRAIN_MODEL}" \
   --system-prompt-file "${SYSTEM_PROMPT_FILE}" \
+  --user-prompt "${QWEN35_USER_PROMPT}" \
   --output-root "${OUTPUT_ROOT}" \
   --output-dir "${SWIFT_OUTPUT_DIR}" \
+  "${TRAIN_DATA_RATIO_ARGS[@]}" \
   "${MAX_SAMPLES_ARGS[@]}" \
   --schedule "${SCHEDULE}" \
   --domain-balance "${DOMAIN_BALANCE}" \
   "${DOMAIN_RATIO_ARGS[@]}" \
+  "${DOMAIN_ORDER_ARGS[@]}" \
   --cuda-visible-devices "${TRAIN_CUDA_VISIBLE_DEVICES}" \
   --nproc-per-node "${TRAIN_NPROC_PER_NODE}" \
   --image-max-token-num none \

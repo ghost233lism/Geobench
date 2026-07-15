@@ -39,6 +39,27 @@ BUCKET_ORDER = [
     'low_mean_high_std',
 ]
 USER_PROMPT = '<image> Based on the image, tell me the specific location and your thinking process. Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+NO_TAGS_USER_PROMPT = '<image> Based on the image, reason carefully about the visual clues and tell me the specific location. Output only the required JSON.'
+
+
+def parse_train_data_ratio(value):
+    if isinstance(value, (float, int)):
+        ratio = float(value)
+    else:
+        text = str(value).strip().lower()
+        if text in ('', 'all'):
+            return 1.0
+        try:
+            if text.endswith('%'):
+                ratio = float(text[:-1]) / 100.0
+            else:
+                ratio = float(text)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(
+                '--train-data-ratio must be a float in (0, 1] or a percentage like 25%.') from e
+    if not 0.0 < ratio <= 1.0:
+        raise argparse.ArgumentTypeError('--train-data-ratio must be > 0 and <= 1.')
+    return ratio
 
 
 def parse_args():
@@ -50,12 +71,19 @@ def parse_args():
     parser.add_argument('--model', type=Path, default=DEFAULT_MODEL)
     parser.add_argument('--model-type', default=None)
     parser.add_argument('--system-prompt-file', type=Path, default=DEFAULT_SYSTEM_PROMPT_FILE)
+    parser.add_argument('--user-prompt', default=USER_PROMPT)
     parser.add_argument('--output-root', type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument('--run-name', default=None)
     parser.add_argument('--schedule', choices=['four_stage', 'curriculum_mix', 'random'], default='four_stage')
     parser.add_argument('--domain-balance', choices=['ratio', 'random', 'sequential_domain'], default='ratio')
     parser.add_argument('--domain-ratio', default=None, help='Example: ground:2,street:2,indoor:1,uav:1')
+    parser.add_argument('--domain-order', default=None, help='Comma or whitespace separated domain order prefix.')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument(
+        '--train-data-ratio',
+        type=parse_train_data_ratio,
+        default=1.0,
+        help='Randomly keep this fraction of input data before bucket sorting and domain scheduling.')
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--cuda-visible-devices', default=DEFAULT_CUDA_VISIBLE_DEVICES)
@@ -131,6 +159,12 @@ def parse_domain_ratio(text):
     return ratio
 
 
+def parse_domain_order(text):
+    if not text:
+        return []
+    return [item.strip() for item in text.replace(',', ' ').split() if item.strip()]
+
+
 def load_rows(path):
     rows = []
     with path.open('r', encoding='utf-8') as f:
@@ -143,6 +177,15 @@ def load_rows(path):
                     raise ValueError(f'Missing `{key}` in {path}:{line_no}')
             rows.append(row)
     return rows
+
+
+def sample_rows_by_ratio(rows, ratio, rng):
+    if not rows or ratio >= 1.0:
+        return rows
+    sample_size = max(1, int(len(rows) * ratio))
+    if sample_size >= len(rows):
+        return rows
+    return rng.sample(rows, sample_size)
 
 
 def assign_buckets(rows):
@@ -208,13 +251,20 @@ def curriculum_mix_order(buckets, rng):
     return ordered
 
 
-def interleave_domains(ordered_by_domain, domain_balance, domain_ratio, rng):
-    if domain_balance == 'random':
-        rows = [row for domain_rows in ordered_by_domain.values() for row in domain_rows]
-        rng.shuffle(rows)
-        return rows
+def ordered_domain_names(ordered_by_domain, domain_order):
+    available = {name for name, rows in ordered_by_domain.items() if rows}
+    names = []
+    seen = set()
+    for domain in domain_order:
+        if domain in available and domain not in seen:
+            names.append(domain)
+            seen.add(domain)
+    names.extend(domain for domain in sorted(available) if domain not in seen)
+    return names
 
-    domain_names = [name for name in sorted(ordered_by_domain) if ordered_by_domain[name]]
+
+def interleave_domains(ordered_by_domain, domain_balance, domain_ratio, rng, domain_order=None):
+    domain_names = ordered_domain_names(ordered_by_domain, domain_order or [])
     if domain_balance == 'sequential_domain':
         rows = []
         for domain in domain_names:
@@ -229,6 +279,13 @@ def interleave_domains(ordered_by_domain, domain_balance, domain_ratio, rng):
         raise ValueError('No domains available for ratio scheduling.')
 
     rows = []
+    if domain_balance == 'random':
+        while any(queues.values()):
+            active_domains = [domain for domain in domain_names if queues[domain]]
+            domain = rng.choice(active_domains)
+            rows.append(queues[domain].popleft())
+        return rows
+
     while any(queues.values()):
         made_progress = False
         for domain in cycle:
@@ -249,11 +306,11 @@ def load_system_prompt(path):
         raise RuntimeError(f'Failed to read --system-prompt-file {path}: {e}') from e
 
 
-def to_swift_row(row, system_prompt):
+def to_swift_row(row, system_prompt, user_prompt):
     return {
         'messages': [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': USER_PROMPT},
+            {'role': 'user', 'content': user_prompt},
         ],
         'images': [row['path']],
         'latitude': row['latitude'],
@@ -266,11 +323,11 @@ def to_swift_row(row, system_prompt):
     }
 
 
-def write_jsonl(rows, output_path, system_prompt):
+def write_jsonl(rows, output_path, system_prompt, user_prompt):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open('w', encoding='utf-8') as f:
         for row in rows:
-            f.write(json.dumps(to_swift_row(row, system_prompt), ensure_ascii=False) + '\n')
+            f.write(json.dumps(to_swift_row(row, system_prompt, user_prompt), ensure_ascii=False) + '\n')
 
 
 def print_stats(rows, medians, domain_ratio):
@@ -401,22 +458,30 @@ def main():
     run_name = args.run_name or datetime.now().strftime('geogrpo_%Y%m%d_%H%M%S')
     output_path = args.output_root / f'{run_name}.jsonl'
     domain_ratio = parse_domain_ratio(args.domain_ratio)
+    domain_order = parse_domain_order(args.domain_order)
     system_prompt = load_system_prompt(args.system_prompt_file)
 
     rows = load_rows(args.input)
+    input_row_count = len(rows)
+    rows = sample_rows_by_ratio(rows, args.train_data_ratio, rng)
+    pre_schedule_row_count = len(rows)
     by_domain, medians = assign_buckets(rows)
     effective_domain_ratio = {domain: domain_ratio.get(domain, 1) for domain in sorted(by_domain)}
     ordered_by_domain = {
         domain: order_domain_rows(domain_rows, args.schedule, rng)
         for domain, domain_rows in by_domain.items()
     }
-    scheduled_rows = interleave_domains(ordered_by_domain, args.domain_balance, effective_domain_ratio, rng)
+    scheduled_rows = interleave_domains(
+        ordered_by_domain, args.domain_balance, effective_domain_ratio, rng, domain_order)
     if args.max_samples is not None:
         scheduled_rows = scheduled_rows[:args.max_samples]
 
-    write_jsonl(scheduled_rows, output_path, system_prompt)
+    write_jsonl(scheduled_rows, output_path, system_prompt, args.user_prompt)
+    print(f'Input rows: {input_row_count}')
+    print(f'Train data ratio: {args.train_data_ratio:g}; rows before scheduling: {pre_schedule_row_count}')
     print_stats(scheduled_rows, medians, effective_domain_ratio)
     print(f'System prompt file: {args.system_prompt_file}')
+    print(f'User prompt: {args.user_prompt}')
     print(f'\nScheduled dataset: {output_path}')
 
     cmd = build_swift_command(args, output_path, run_name)
@@ -433,7 +498,8 @@ def main():
     print('\nEnvironment:')
     for key in (
             'CUDA_VISIBLE_DEVICES', 'NPROC_PER_NODE', 'IMAGE_MAX_TOKEN_NUM', 'GEOSCORE_CACHE_FILE',
-            'PYTORCH_CUDA_ALLOC_CONF', 'PYTORCH_ALLOC_CONF'):
+            'PYTORCH_CUDA_ALLOC_CONF', 'PYTORCH_ALLOC_CONF', 'PYTHONPATH', 'GEOBENCH_LOG_SITECUSTOMIZE',
+            'GEOBENCH_PATCH_QWEN35_ZERO3_CONV1D', 'GEOBENCH_DISABLE_QWEN35_CAUSAL_CONV1D'):
         print(f'  {key}={env.get(key, "<unset>")}')
     print('\nSwift command:')
     print(shell_join(redact_command(cmd)))

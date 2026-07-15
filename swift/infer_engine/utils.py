@@ -7,7 +7,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from functools import partial
+from functools import partial, wraps
 from itertools import repeat
 from packaging import version
 from queue import Queue
@@ -18,6 +18,26 @@ from typing import List, Optional, Union
 from swift.model.register import fix_do_sample_warning
 from swift.utils import get_device
 from .protocol import RequestConfig
+
+
+_vllm_engine_core_original_run = None
+
+
+def _swift_run_vllm_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    patch_vllm_transformers_compat()
+    from vllm.v1.engine.core import EngineCoreProc
+
+    original_run = _vllm_engine_core_original_run
+    if original_run is None:
+        original_run = EngineCoreProc.run_engine_core
+    return original_run(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
 @dataclass
@@ -608,3 +628,74 @@ def patch_vllm_memory_leak():
 
     patch_vllm_abort_seq_group()
     patch_vllm_engine()
+
+
+def patch_vllm_transformers_compat():
+    """Patch compatibility gaps between newer transformers and vLLM config shims."""
+    try:
+        from transformers.configuration_utils import PretrainedConfig
+    except Exception:
+        return
+
+    original_method = getattr(PretrainedConfig, 'convert_rope_params_to_dict', None)
+    if original_method is not None and not getattr(original_method, '_swift_accepts_sequence_ignore_keys', False):
+
+        @wraps(original_method)
+        def _convert_rope_params_to_dict(self, ignore_keys_at_rope_validation=None, **kwargs):
+            if isinstance(ignore_keys_at_rope_validation, (list, tuple)):
+                ignore_keys_at_rope_validation = set(ignore_keys_at_rope_validation)
+            return original_method(
+                self, ignore_keys_at_rope_validation=ignore_keys_at_rope_validation, **kwargs)
+
+        _convert_rope_params_to_dict._swift_accepts_sequence_ignore_keys = True
+        PretrainedConfig.convert_rope_params_to_dict = _convert_rope_params_to_dict
+
+    try:
+        from vllm.config import utils as vllm_config_utils
+    except Exception:
+        vllm_config_utils = None
+    if vllm_config_utils is not None:
+        original_normalize_value = getattr(vllm_config_utils, 'normalize_value', None)
+        if original_normalize_value is not None and not getattr(
+                original_normalize_value, '_swift_accepts_pretrained_config', False):
+
+            @wraps(original_normalize_value)
+            def _normalize_value(value):
+                if isinstance(value, PretrainedConfig):
+                    if hasattr(value, 'to_json_string') and callable(value.to_json_string):
+                        return value.to_json_string()
+                    return original_normalize_value(value.to_dict())
+                return original_normalize_value(value)
+
+            _normalize_value._swift_accepts_pretrained_config = True
+            vllm_config_utils.normalize_value = _normalize_value
+
+    if _env_flag('SWIFT_VLLM_FORCE_NATIVE_GDN'):
+        try:
+            from vllm.model_executor.models import qwen3_next
+        except Exception:
+            qwen3_next = None
+        if qwen3_next is not None:
+            original_init = qwen3_next.ChunkGatedDeltaRule.__init__
+            if not getattr(original_init, '_swift_force_native_gdn', False):
+
+                @wraps(original_init)
+                def _chunk_gated_delta_rule_init(self, *args, **kwargs):
+                    original_init(self, *args, **kwargs)
+                    self._forward_method = self.forward_native
+
+                _chunk_gated_delta_rule_init._swift_force_native_gdn = True
+                qwen3_next.ChunkGatedDeltaRule.__init__ = _chunk_gated_delta_rule_init
+
+    try:
+        from vllm.v1.engine.core import EngineCoreProc
+    except Exception:
+        return
+
+    global _vllm_engine_core_original_run
+    current_run = EngineCoreProc.run_engine_core
+    if getattr(current_run, '_swift_applies_transformers_compat', False):
+        return
+    _vllm_engine_core_original_run = current_run
+    _swift_run_vllm_engine_core._swift_applies_transformers_compat = True
+    EngineCoreProc.run_engine_core = staticmethod(_swift_run_vllm_engine_core)
