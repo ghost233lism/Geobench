@@ -1,4 +1,6 @@
-cd path/to/xxx
+#!/usr/bin/env bash
+set -euo pipefail
+
 pip install -U ms-swift
 pip install -U "transformers>=5.9" "qwen_vl_utils>=0.0.14" peft liger-kernel
 
